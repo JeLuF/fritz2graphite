@@ -1,9 +1,12 @@
 #!/bin/bash
 # 
-#  upnp2mrtg - Monitoring AVM Fritz!Box With MRTG
+#  fritz2graphite - Monitoring AVM Fritz!Box With Graphite
 #  This versions have been reported as working: 3030, 5050, 7050, 7141 and 7170
 #
 #  Copyright (C) 2005 Michael Tomschitz <michael.tomschitz@ANetzB.de>
+#                original upnp2mrtg
+#  Copyright (C) 2013 Jens Frank <jeluf@mormo.org>
+#                migration to graphite output format
 #
 #  This program is free software; you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -19,19 +22,21 @@
 #  along with this program; if not, write to the Free Software
 #  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #
-#  The latest version of this software can be obtained here:
+#  The latest version of upnp2mrtg can be obtained here:
 # 
 #  http://www.ANetzB.de/upnp2mrtg/
 #
-#  $Id: upnp2mrtg,v 1.9 2008/02/09 15:37:57 tomcat Exp $
 
 # default configuration
 HOST="fritz.box"
 PORT="49000"
-NETCAT="netcat"
+NETCAT="nc"
+GRAPHITEPORT="2003"
+PREFIX="fritz_box"
 
 # if available, read configuration 
 test -f /etc/upnp2mrtg.cfg && . /etc/upnp2mrtg.cfg
+test -f /etc/fritz2graphite.cfg && . /etc/fritz2graphite.cfg
 
 case $NETCAT in
     bash) nc="shell_netcat" ;;
@@ -40,39 +45,52 @@ case $NETCAT in
     *) nc="nc" ;;
 esac
 
-ver_txt="upnp2mrtg, version $Revision: 1.9 $
+ver_txt="fritz2graphite, version: 1.0
 Copyright (C) 2005-2008 Michael Tomschitz
-upnp2mrtg comes with ABSOLUTELY NO WARRANTY. This is free software,
+Copyright (C) 2013      Jens Frank
+fritz2graphite comes with ABSOLUTELY NO WARRANTY. This is free software,
 and you are welcome to redistribute it under certain conditions."
 
 help_txt="\
-Usage: upnp2mrtg [-a <host>] [-p <port>] [-P] [-d] [-h] [-i] [-t] [-v] [-V]
+Usage: fritz2graphite [-a <host>] [-p <port>] [-G <port>] [-P <prefix>] [-d] [-h] [-i] [-t] [-v] [-V] -g <host>
 
-  -a <host>    hostname or ip adress of upnp device (default: $HOST)
+  -a <host>    hostname or ip address of upnp device (default: $HOST)
   -p <port>    port to connect (default: $PORT)
-  -P           query packets instead of bytes
+  -g <host>    hostname or ip address of the graphite server
+  -G <port>    carbon port on the graphite server (default: $GRAPHITEPORT)
+  -P <prefix>  prefix for the graphite path (default: $PREFIX)
   -d           debug mode
   -h           show help and exit
   -i <outfile> get all igd description
   -t           test connection
-  -v           show upnp2mrtg version and exit
+  -v           show fritz2graphite version and exit
   -V           be verbose for testing
 "
 
-while getopts "a:dhi:p:PtvV" option; do
+while getopts "a:dg:G:hi:p:P:tvV" option; do
   case $option in
     a) HOST="$OPTARG";;
     d) set -x ;;
+    g) GRAPHITE="$OPTARG";;
+    G) GRAPHITEPORT="$OPTARG";;
     h) echo "$help_txt"; exit 0;;
     i) MODE=igd; IGDXML="$OPTARG";;
     p) PORT="$OPTARG";;
-    P) PACKET_MODE=true;;
+    P) PREFIX="$OPTARG";;
     t) MODE="test";;
     v) echo "$ver_txt"; exit 0;;
     V) VERBOSE=true;;
     ?) exit 1;;
   esac
 done
+
+if [ "$GRAPHITE" = "" ]; then
+	echo "ERROR: Graphite host not set"
+	echo
+	echo "$help_txt"
+	exit 1
+fi
+
 
 # functions
 request_header () {
@@ -182,16 +200,25 @@ if [ $? -eq 0 ]; then
 fi
 
 # get data in/out
-if ${PACKET_MODE:-false}; then
-  b1="`ws_operation GetTotalPacketsReceived NewTotalPacketsReceived`"
-  b2="`ws_operation GetTotalPacketsSent NewTotalPacketsSent`"
-else
-  b1="`ws_operation GetAddonInfos NewTotalBytesReceived`"
-  b2="`ws_operation GetAddonInfos NewTotalBytesSent`"
-fi
+b1="`ws_operation GetTotalPacketsReceived NewTotalPacketsReceived`"
+b2="`ws_operation GetTotalPacketsSent NewTotalPacketsSent`"
 
-# output for mrtg
-printf "%s\n%s\n%d days %.2d:%.2d:%.2d h (online)\nFritz!Box\n" \
-  "${b1:-UNKNOWN}" "${b2:-UNKNOWN}" "${h% *}" "${h#* }" "${m#* }" "${s#* }"
-  ;;
+b3=`ws_operation GetCommonLinkProperties NewLayer1UpstreamMaxBitRate`
+b4=`ws_operation GetCommonLinkProperties NewLayer1DownstreamMaxBitRate`
+b5="`ws_operation GetAddonInfos NewTotalBytesReceived`"
+b6="`ws_operation GetAddonInfos NewTotalBytesSent`"
+
+# output for graphite
+t=`date +%s`
+(
+  echo $PREFIX.TotalPacketsReceived ${b1:-1} $t
+  echo $PREFIX.TotalPacketsSent ${b2:-1} $t
+  echo $PREFIX.TotalBytesReceived ${b5:-1} $t
+  echo $PREFIX.TotalBytesSent ${b6:-1} $t
+  echo $PREFIX.Uptime $ut $t
+  echo $PREFIX.Layer1UpstreamMaxBitRate ${b3:-1} $t
+  echo $PREFIX.Layer1DownstreamMaxBitRate ${b4:-1} $t
+) | $nc $GRAPHITE $GRAPHITEPORT
+
+;;
 esac
